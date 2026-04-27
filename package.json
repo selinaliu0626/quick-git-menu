@@ -1,0 +1,43 @@
+{
+  "name": "super-git-helper",
+  "displayName": "Super Git Helper",
+  "version": "1.0.0",
+  "publisher": "myself",
+  "engines": { "vscode": "^1.80.0" },
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "super-git-helper-sidebar",
+          "title": "Super Git",
+          "icon": "$(git-branch)"
+        }
+      ]
+    },
+    "views": {
+      "super-git-helper-sidebar": [
+        {
+          "id": "git-helper-view",
+          "name": "Git Actions"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "git-helper-view",
+        "contents": "Welcome to your Git Helper.\n[Local Branches](command:super-git-helper.localMenu)\n[Remote Branches](command:super-git-helper.remoteMenu)\n[Create New Branch](command:super-git-helper.createBranch)\n[View Changed Files](command:super-git-helper.listChangedFiles)"
+      }
+    ],
+    "commands": [
+      { "command": "super-git-helper.localMenu", "title": "Show Local Branches" },
+      { "command": "super-git-helper.remoteMenu", "title": "Show Remote Branches" },
+      { "command": "super-git-helper.createBranch", "title": "Create New Branch" },
+      {
+        "command": "super-git-helper.listChangedFiles",
+        "title": "View Changed Files"
+      }
+    ]
+  }
+}
