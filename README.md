@@ -18,6 +18,7 @@ In VS Code, the extension appears as **Super Git Helper** in the activity bar an
 - List changed files and compare them:
   - against `HEAD`
   - against another branch
+- Cherry-pick a commit by SHA after fetching remotes, inspecting commit details, and selecting a source branch when multiple branches contain the commit
 
 ## Commands
 
@@ -27,6 +28,7 @@ The extension contributes these commands:
 - `Show Remote Branches`
 - `Create New Branch`
 - `View Changed Files`
+- `Cherry Pick Commit`
 
 ## How It Works
 
@@ -36,6 +38,7 @@ The extension uses the first open workspace folder as the Git repo root and runs
 - `git branch -r`
 - `git checkout`
 - `git checkout -b`
+- `git cherry-pick`
 - `git push --delete`
 - `git status --short`
 - `git show`
