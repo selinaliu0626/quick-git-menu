@@ -204,21 +204,14 @@ async function cherryPickCommitLogic(rootPath) {
 }
 
 async function rollbackCommitLogic(rootPath) {
-    const commitRef = await vscode.window.showInputBox({
-        prompt: 'Commit SHA to roll back from the current branch',
-        placeHolder: 'Example: a1b2c3d or full commit SHA',
-        validateInput: (value) => {
-            if (!value.trim()) return 'Enter a commit SHA.';
-            if (!/^[0-9a-fA-F]+$/.test(value.trim())) return 'Commit SHA should only contain hex characters.';
-            return null;
-        }
-    });
-
-    if (!commitRef) return;
-
     try {
         const currentBranch = await requireCurrentBranch(rootPath);
         await ensureCleanWorktree(rootPath);
+        await ensureCommitHistoryExists(rootPath);
+
+        const commitRef = await promptForRollbackCommitRef(rootPath);
+        if (!commitRef) return;
+
         const inspection = await inspectCommit(rootPath, commitRef.trim(), 'Preparing rollback');
         await ensureCommitCanBeDropped(rootPath, inspection.commitInfo.sha);
         const parentCommit = await getCommitParent(rootPath, inspection.commitInfo.sha);
@@ -862,6 +855,37 @@ async function getRecentCommits(rootPath, count) {
         });
 }
 
+async function promptForRollbackCommitRef(rootPath) {
+    const recentCommits = await getRecentCommits(rootPath, 6);
+    const quickPickItems = recentCommits.map((commit, index) => ({
+        label: `${commit.shortSha} ${commit.subject}`,
+        description: `${commit.author} - ${commit.date}`,
+        detail: index === 0 ? 'HEAD (most recent commit)' : `HEAD~${index}`,
+        commitRef: commit.sha
+    }));
+
+    quickPickItems.push({
+        label: '$(edit) Enter commit SHA manually',
+        description: 'Use a commit SHA that is not listed above',
+        detail: 'Manual commit entry',
+        commitRef: null
+    });
+
+    const selected = await vscode.window.showQuickPick(quickPickItems, {
+        title: 'Rollback Commit: Select one of the last 6 commits or enter a SHA manually',
+        matchOnDescription: true,
+        matchOnDetail: true
+    });
+
+    if (!selected) return null;
+    if (selected.commitRef) return selected.commitRef;
+
+    return promptForCommitSha(
+        'Commit SHA to roll back from the current branch',
+        'Example: a1b2c3d or full commit SHA'
+    );
+}
+
 async function pickCommitsToSquash(commits) {
     return new Promise((resolve) => {
         const quickPick = vscode.window.createQuickPick();
@@ -1264,6 +1288,20 @@ async function getHeadCommitSummary(rootPath) {
     const output = await gitOutput(rootPath, ['show', '-s', '--format=%h%n%s', 'HEAD']);
     const [shortSha, subject] = output.split('\n');
     return { shortSha, subject };
+}
+
+async function promptForCommitSha(prompt, placeHolder) {
+    const commitRef = await vscode.window.showInputBox({
+        prompt,
+        placeHolder,
+        validateInput: (value) => {
+            if (!value.trim()) return 'Enter a commit SHA.';
+            if (!/^[0-9a-fA-F]+$/.test(value.trim())) return 'Commit SHA should only contain hex characters.';
+            return null;
+        }
+    });
+
+    return commitRef?.trim() || null;
 }
 
 async function promptForCommitMessage(prompt, value = '') {

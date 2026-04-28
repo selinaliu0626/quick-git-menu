@@ -19,7 +19,7 @@ In VS Code, the extension appears as **Super Git Helper** in the activity bar an
   - against `HEAD`
   - against another branch
 - Apply a commit by SHA without auto-committing after fetching remotes, inspecting commit details, and selecting a source branch when multiple branches contain the commit
-- Roll back a commit by SHA with clean history by removing that commit from the current branch
+- Roll back a commit with clean history by choosing from the last 6 commits or entering a SHA manually
 - Rebase the current branch onto its configured upstream or onto a selected local or remote branch
 - Commit selected changed files with a new message or by amending the previous commit
 - Review the last `N` commits, choose which of them to keep, and rewrite them into one new commit
