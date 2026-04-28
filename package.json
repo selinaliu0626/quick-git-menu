@@ -27,7 +27,7 @@
     "viewsWelcome": [
       {
         "view": "git-helper-view",
-        "contents": "Welcome to your Git Helper.\n[Local Branches](command:super-git-helper.localMenu)\n[Remote Branches](command:super-git-helper.remoteMenu)\n[Create New Branch](command:super-git-helper.createBranch)\n[View Changed Files](command:super-git-helper.listChangedFiles)\n[Cherry Pick Commit](command:super-git-helper.cherryPickCommit)"
+        "contents": "Welcome to your Git Helper.\n[Local Branches](command:super-git-helper.localMenu)\n[Remote Branches](command:super-git-helper.remoteMenu)\n[Create New Branch](command:super-git-helper.createBranch)\n[View Changed Files](command:super-git-helper.listChangedFiles)\n[Cherry Pick Commit](command:super-git-helper.cherryPickCommit)\n[Rollback Commit](command:super-git-helper.rollbackCommit)"
       }
     ],
     "commands": [
@@ -41,6 +41,10 @@
       {
         "command": "super-git-helper.cherryPickCommit",
         "title": "Cherry Pick Commit"
+      },
+      {
+        "command": "super-git-helper.rollbackCommit",
+        "title": "Rollback Commit"
       }
     ]
   }

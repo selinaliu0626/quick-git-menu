@@ -18,7 +18,8 @@ In VS Code, the extension appears as **Super Git Helper** in the activity bar an
 - List changed files and compare them:
   - against `HEAD`
   - against another branch
-- Cherry-pick a commit by SHA after fetching remotes, inspecting commit details, and selecting a source branch when multiple branches contain the commit
+- Apply a commit by SHA without auto-committing after fetching remotes, inspecting commit details, and selecting a source branch when multiple branches contain the commit
+- Roll back a commit by SHA without auto-committing by applying the inverse changes onto the current branch
 
 ## Commands
 
@@ -29,6 +30,7 @@ The extension contributes these commands:
 - `Create New Branch`
 - `View Changed Files`
 - `Cherry Pick Commit`
+- `Rollback Commit`
 
 ## How It Works
 
@@ -38,7 +40,8 @@ The extension uses the first open workspace folder as the Git repo root and runs
 - `git branch -r`
 - `git checkout`
 - `git checkout -b`
-- `git cherry-pick`
+- `git cherry-pick --no-commit`
+- `git revert --no-commit`
 - `git push --delete`
 - `git status --short`
 - `git show`

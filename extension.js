@@ -51,6 +51,11 @@ function activate(context) {
         if (!rootPath()) return vscode.window.showErrorMessage('Open a project!');
         await cherryPickCommitLogic(rootPath());
     }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('super-git-helper.rollbackCommit', async () => {
+        if (!rootPath()) return vscode.window.showErrorMessage('Open a project!');
+        await rollbackCommitLogic(rootPath());
+    }));
 }
 
 async function listChangedFilesLogic(rootPath) {
@@ -122,23 +127,7 @@ async function cherryPickCommitLogic(rootPath) {
 
     try {
         const currentBranch = await gitOutput(rootPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
-        const inspection = await vscode.window.withProgress({
-            location: vscode.ProgressLocation.Notification,
-            title: 'Preparing cherry-pick',
-            cancellable: false
-        }, async (progress) => {
-            progress.report({ message: 'Fetching remotes...' });
-            await git(rootPath, ['fetch', '--all', '--prune']);
-
-            progress.report({ message: 'Reading commit info...' });
-            const commitInfo = await getCommitInfo(rootPath, commitRef.trim());
-
-            progress.report({ message: 'Resolving candidate branches...' });
-            const remoteBranches = await getContainingBranches(rootPath, commitRef.trim(), true);
-            const localBranches = await getContainingBranches(rootPath, commitRef.trim(), false);
-
-            return { commitInfo, remoteBranches, localBranches };
-        });
+        const inspection = await inspectCommit(rootPath, commitRef.trim(), 'Preparing cherry-pick');
 
         const sourceBranch = await pickSourceBranch(inspection.remoteBranches, inspection.localBranches);
         if (sourceBranch === undefined) return;
@@ -165,21 +154,21 @@ async function cherryPickCommitLogic(rootPath) {
         const approved = await vscode.window.showWarningMessage(
             confirmation,
             { modal: true },
-            'Cherry Pick'
+            'Apply Changes'
         );
 
-        if (approved !== 'Cherry Pick') return;
+        if (approved !== 'Apply Changes') return;
 
         await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
-            title: 'Cherry-picking commit',
+            title: 'Applying commit changes',
             cancellable: false
         }, async () => {
-            await git(rootPath, ['cherry-pick', inspection.commitInfo.sha]);
+            await git(rootPath, ['cherry-pick', '--no-commit', inspection.commitInfo.sha]);
         });
 
         vscode.window.showInformationMessage(
-            `Cherry-picked ${inspection.commitInfo.shortSha} into ${currentBranch}.`
+            `Applied ${inspection.commitInfo.shortSha} onto ${currentBranch} without creating a commit.`
         );
     } catch (error) {
         const message = isCherryPickConflict(error.message)
@@ -189,8 +178,98 @@ async function cherryPickCommitLogic(rootPath) {
     }
 }
 
+async function rollbackCommitLogic(rootPath) {
+    const commitRef = await vscode.window.showInputBox({
+        prompt: 'Commit SHA to roll back from the current branch',
+        placeHolder: 'Example: a1b2c3d or full commit SHA',
+        validateInput: (value) => {
+            if (!value.trim()) return 'Enter a commit SHA.';
+            if (!/^[0-9a-fA-F]+$/.test(value.trim())) return 'Commit SHA should only contain hex characters.';
+            return null;
+        }
+    });
+
+    if (!commitRef) return;
+
+    try {
+        const currentBranch = await gitOutput(rootPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+        const inspection = await inspectCommit(rootPath, commitRef.trim(), 'Preparing rollback');
+
+        const sourceBranch = await pickSourceBranch(inspection.remoteBranches, inspection.localBranches);
+        if (sourceBranch === undefined) return;
+
+        if (sourceBranch && sourceBranch.type === 'remote') {
+            await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: 'Fetching source branch',
+                cancellable: false
+            }, async () => {
+                const { remoteName, branchName } = splitRemoteBranch(sourceBranch.name);
+                await git(rootPath, ['fetch', remoteName, branchName]);
+            });
+        }
+
+        const confirmation = [
+            `Current branch: ${currentBranch}`,
+            `Rollback commit: ${inspection.commitInfo.shortSha} ${inspection.commitInfo.subject}`,
+            `Author: ${inspection.commitInfo.author}`,
+            `Date: ${inspection.commitInfo.date}`,
+            `Source: ${formatSourceBranchLabel(sourceBranch)}`
+        ].join('\n');
+
+        const approved = await vscode.window.showWarningMessage(
+            confirmation,
+            { modal: true },
+            'Apply Rollback'
+        );
+
+        if (approved !== 'Apply Rollback') return;
+
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: 'Applying rollback',
+            cancellable: false
+        }, async () => {
+            await git(rootPath, ['revert', '--no-commit', inspection.commitInfo.sha]);
+        });
+
+        vscode.window.showInformationMessage(
+            `Applied rollback for ${inspection.commitInfo.shortSha} onto ${currentBranch} without creating a commit.`
+        );
+    } catch (error) {
+        const message = isRevertConflict(error.message)
+            ? `${error.message}\nResolve conflicts, then run git revert --continue or git revert --abort.`
+            : error.message;
+        vscode.window.showErrorMessage(message);
+    }
+}
+
 function isCherryPickConflict(message) {
     return /conflict/i.test(message) || message.includes('cherry-pick --continue');
+}
+
+function isRevertConflict(message) {
+    return /conflict/i.test(message) || message.includes('revert --continue');
+}
+
+async function inspectCommit(rootPath, commitRef, title) {
+    return vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title,
+        cancellable: false
+    }, async (progress) => {
+        progress.report({ message: 'Fetching remotes...' });
+        await git(rootPath, ['fetch', '--all', '--prune']);
+
+        progress.report({ message: 'Reading commit info...' });
+        const commitInfo = await getCommitInfo(rootPath, commitRef);
+
+        progress.report({ message: 'Resolving candidate branches...' });
+        const remoteBranches = await getContainingBranches(rootPath, commitRef, true);
+        const localBranches = await getContainingBranches(rootPath, commitRef, false);
+
+        return { commitInfo, remoteBranches, localBranches };
+    });
 }
 
 async function getCommitInfo(rootPath, commitRef) {
