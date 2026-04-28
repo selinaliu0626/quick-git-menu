@@ -56,6 +56,11 @@ function activate(context) {
         if (!rootPath()) return vscode.window.showErrorMessage('Open a project!');
         await rollbackCommitLogic(rootPath());
     }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('super-git-helper.rebaseCurrentBranch', async () => {
+        if (!rootPath()) return vscode.window.showErrorMessage('Open a project!');
+        await rebaseCurrentBranchLogic(rootPath());
+    }));
 }
 
 async function listChangedFilesLogic(rootPath) {
@@ -244,12 +249,101 @@ async function rollbackCommitLogic(rootPath) {
     }
 }
 
+async function rebaseCurrentBranchLogic(rootPath) {
+    try {
+        const currentBranch = await requireCurrentBranch(rootPath);
+        await ensureCleanWorktree(rootPath);
+
+        const mode = await vscode.window.showQuickPick([
+            {
+                label: 'Use upstream branch',
+                id: 'UPSTREAM',
+                detail: 'Rebase the current branch onto its configured @{upstream} branch'
+            },
+            {
+                label: 'Choose another branch',
+                id: 'SELECT',
+                detail: 'Pick a local or remote branch to rebase onto'
+            }
+        ], {
+            title: `Rebase ${currentBranch}: Choose target`
+        });
+
+        if (!mode) return;
+
+        const target = await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: 'Preparing rebase',
+            cancellable: false
+        }, async (progress) => {
+            progress.report({ message: 'Fetching remotes...' });
+            await git(rootPath, ['fetch', '--all', '--prune']);
+
+            if (mode.id === 'UPSTREAM') {
+                const upstream = await getUpstreamBranch(rootPath);
+                return {
+                    name: upstream,
+                    type: upstream.includes('/') ? 'remote' : 'local',
+                    source: 'upstream'
+                };
+            }
+
+            progress.report({ message: 'Loading branches...' });
+            return pickRebaseTarget(rootPath, currentBranch);
+        });
+
+        if (!target) return;
+
+        const confirmation = [
+            `Current branch: ${currentBranch}`,
+            `Rebase onto: ${target.name}`,
+            `Target type: ${target.type}`,
+            `Selection: ${target.source === 'upstream' ? 'configured upstream' : 'manual branch selection'}`,
+            'Warning: rebase rewrites commit history.'
+        ].join('\n');
+
+        const approved = await vscode.window.showWarningMessage(
+            confirmation,
+            { modal: true },
+            'Start Rebase'
+        );
+
+        if (approved !== 'Start Rebase') return;
+
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: `Rebasing ${currentBranch}`,
+            cancellable: false
+        }, async () => {
+            await git(rootPath, ['rebase', target.name]);
+        });
+
+        const currentUpstream = await tryGetUpstreamBranch(rootPath);
+        const pushNote = currentUpstream
+            ? ' If this branch was already pushed, the next push may require git push --force-with-lease.'
+            : '';
+
+        vscode.window.showInformationMessage(
+            `Rebased ${currentBranch} onto ${target.name}.${pushNote}`
+        );
+    } catch (error) {
+        const message = isRebaseConflict(error.message)
+            ? `${error.message}\nResolve conflicts, then run git rebase --continue, git rebase --skip, or git rebase --abort.`
+            : error.message;
+        vscode.window.showErrorMessage(message);
+    }
+}
+
 function isCherryPickConflict(message) {
     return /conflict/i.test(message) || message.includes('cherry-pick --continue');
 }
 
 function isRevertConflict(message) {
     return /conflict/i.test(message) || message.includes('revert --continue');
+}
+
+function isRebaseConflict(message) {
+    return /conflict/i.test(message) || message.includes('rebase --continue') || message.includes('Resolve all conflicts');
 }
 
 async function inspectCommit(rootPath, commitRef, title) {
@@ -297,6 +391,47 @@ async function getContainingBranches(rootPath, commitRef, remoteOnly) {
             name: branch,
             type: remoteOnly ? 'remote' : 'local'
         }));
+}
+
+async function getBranchRefs(rootPath, remoteOnly) {
+    const args = remoteOnly ? ['branch', '-r'] : ['branch'];
+    const output = await gitOutput(rootPath, args);
+
+    return output.split('\n')
+        .map((branch) => branch.replace('*', '').trim())
+        .filter((branch) => branch !== '' && !branch.includes('->'))
+        .map((branch) => ({
+            name: branch,
+            type: remoteOnly ? 'remote' : 'local'
+        }));
+}
+
+async function pickRebaseTarget(rootPath, currentBranch) {
+    const localBranches = await getBranchRefs(rootPath, false);
+    const remoteBranches = await getBranchRefs(rootPath, true);
+
+    const branchItems = [...localBranches, ...remoteBranches]
+        .filter((branch) => branch.name !== currentBranch)
+        .map((branch) => ({
+            label: branch.name,
+            detail: branch.type === 'remote' ? 'Remote branch' : 'Local branch',
+            branch
+        }));
+
+    if (branchItems.length === 0) {
+        throw new Error('No rebase targets are available.');
+    }
+
+    const selected = await vscode.window.showQuickPick(branchItems, {
+        title: `Rebase ${currentBranch}: Pick target branch`
+    });
+
+    if (!selected) return undefined;
+
+    return {
+        ...selected.branch,
+        source: 'manual'
+    };
 }
 
 async function pickSourceBranch(remoteBranches, localBranches) {
@@ -357,6 +492,40 @@ function splitRemoteBranch(branchName) {
 
 function formatSourceBranchLabel(sourceBranch) {
     return sourceBranch ? sourceBranch.name : 'commit found, branch unknown';
+}
+
+async function requireCurrentBranch(rootPath) {
+    const currentBranch = await gitOutput(rootPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+
+    if (currentBranch === 'HEAD') {
+        throw new Error('Detached HEAD is not supported. Check out a branch before rebasing.');
+    }
+
+    return currentBranch;
+}
+
+async function ensureCleanWorktree(rootPath) {
+    const status = await gitOutput(rootPath, ['status', '--short']);
+
+    if (status) {
+        throw new Error('Rebase requires a clean working tree. Commit, stash, or discard changes first.');
+    }
+}
+
+async function getUpstreamBranch(rootPath) {
+    try {
+        return await gitOutput(rootPath, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']);
+    } catch (error) {
+        throw new Error('This branch has no configured upstream. Choose another branch or set upstream first.');
+    }
+}
+
+async function tryGetUpstreamBranch(rootPath) {
+    try {
+        return await gitOutput(rootPath, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']);
+    } catch (error) {
+        return null;
+    }
 }
 
 async function diffWithReference(rootPath, filePath, reference) {

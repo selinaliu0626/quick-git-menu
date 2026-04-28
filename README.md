@@ -20,6 +20,7 @@ In VS Code, the extension appears as **Super Git Helper** in the activity bar an
   - against another branch
 - Apply a commit by SHA without auto-committing after fetching remotes, inspecting commit details, and selecting a source branch when multiple branches contain the commit
 - Roll back a commit by SHA without auto-committing by applying the inverse changes onto the current branch
+- Rebase the current branch onto its configured upstream or onto a selected local or remote branch
 
 ## Commands
 
@@ -31,6 +32,7 @@ The extension contributes these commands:
 - `View Changed Files`
 - `Cherry Pick Commit`
 - `Rollback Commit`
+- `Rebase Current Branch`
 
 ## How It Works
 
@@ -41,6 +43,7 @@ The extension uses the first open workspace folder as the Git repo root and runs
 - `git checkout`
 - `git checkout -b`
 - `git cherry-pick --no-commit`
+- `git rebase`
 - `git revert --no-commit`
 - `git push --delete`
 - `git status --short`
@@ -57,3 +60,4 @@ The extension uses the first open workspace folder as the Git repo root and runs
 
 - This extension currently assumes the first workspace folder is the target repository.
 - It depends on Git being installed and available on your system `PATH`.
+- Rebase requires a clean working tree and does not auto-push or auto-stash changes.
