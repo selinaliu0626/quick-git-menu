@@ -27,7 +27,7 @@
     "viewsWelcome": [
       {
         "view": "git-helper-view",
-        "contents": "Welcome to your Git Helper.\n[Local Branches](command:super-git-helper.localMenu)\n[Remote Branches](command:super-git-helper.remoteMenu)\n[Create New Branch](command:super-git-helper.createBranch)\n[View Changed Files](command:super-git-helper.listChangedFiles)\n[Cherry Pick Commit](command:super-git-helper.cherryPickCommit)\n[Rollback Commit](command:super-git-helper.rollbackCommit)\n[Rebase Current Branch](command:super-git-helper.rebaseCurrentBranch)\n[Commit Changes](command:super-git-helper.commitChanges)\n[Create Remote Branch](command:super-git-helper.createRemoteBranch)\n[Push Branch](command:super-git-helper.pushBranch)"
+        "contents": "Welcome to your Git Helper.\n[Local Branches](command:super-git-helper.localMenu)\n[Remote Branches](command:super-git-helper.remoteMenu)\n[Create New Branch](command:super-git-helper.createBranch)\n[View Changed Files](command:super-git-helper.listChangedFiles)\n[Cherry Pick Commit](command:super-git-helper.cherryPickCommit)\n[Rollback Commit](command:super-git-helper.rollbackCommit)\n[Rebase Current Branch](command:super-git-helper.rebaseCurrentBranch)\n[Commit Changes](command:super-git-helper.commitChanges)\n[Squash Recent Commits](command:super-git-helper.squashRecentCommits)\n[Create Remote Branch](command:super-git-helper.createRemoteBranch)\n[Push Branch](command:super-git-helper.pushBranch)"
       }
     ],
     "commands": [
@@ -53,6 +53,10 @@
       {
         "command": "super-git-helper.commitChanges",
         "title": "Commit Changes"
+      },
+      {
+        "command": "super-git-helper.squashRecentCommits",
+        "title": "Squash Recent Commits"
       },
       {
         "command": "super-git-helper.createRemoteBranch",

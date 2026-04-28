@@ -67,6 +67,11 @@ function activate(context) {
         await commitChangesLogic(rootPath());
     }));
 
+    context.subscriptions.push(vscode.commands.registerCommand('super-git-helper.squashRecentCommits', async () => {
+        if (!rootPath()) return vscode.window.showErrorMessage('Open a project!');
+        await squashRecentCommitsLogic(rootPath());
+    }));
+
     context.subscriptions.push(vscode.commands.registerCommand('super-git-helper.createRemoteBranch', async () => {
         if (!rootPath()) return vscode.window.showErrorMessage('Open a project!');
         await createRemoteBranchLogic(rootPath());
@@ -384,6 +389,67 @@ async function commitChangesLogic(rootPath) {
         const summary = await getHeadCommitSummary(rootPath);
         vscode.window.showInformationMessage(
             `${commitPlan.type === 'amend' ? 'Amended' : 'Created'} ${summary.shortSha}: ${summary.subject}`
+        );
+    } catch (error) {
+        vscode.window.showErrorMessage(error.message);
+    }
+}
+
+async function squashRecentCommitsLogic(rootPath) {
+    try {
+        const currentBranch = await requireCurrentBranch(rootPath);
+        await ensureCleanWorktree(rootPath);
+        await ensureCommitHistoryExists(rootPath);
+
+        const reachableCommitCount = await getReachableCommitCount(rootPath);
+        const maxSquashCount = reachableCommitCount - 1;
+
+        if (maxSquashCount < 2) {
+            throw new Error('Squash Recent Commits requires at least 3 commits on the current branch because the root commit is not supported.');
+        }
+
+        const reviewedCommitCount = await promptForSquashCommitCount(maxSquashCount);
+        if (!reviewedCommitCount) return;
+
+        const recentCommits = await getRecentCommits(rootPath, reviewedCommitCount);
+        if (recentCommits.length !== reviewedCommitCount) {
+            throw new Error(`Expected ${reviewedCommitCount} commits to review, but found ${recentCommits.length}.`);
+        }
+
+        const selectedCommits = await pickCommitsToSquash(recentCommits);
+        if (!selectedCommits || selectedCommits.length === 0) return;
+
+        const commitMessage = await promptForCommitMessage('New squashed commit message');
+        if (!commitMessage) return;
+
+        const allSelected = selectedCommits.length === recentCommits.length;
+        const confirmation = buildSquashConfirmation(currentBranch, recentCommits, selectedCommits, commitMessage);
+        const actionLabel = allSelected ? 'Squash Commits' : 'Rewrite Commits';
+        const approved = await vscode.window.showWarningMessage(
+            confirmation,
+            { modal: true },
+            actionLabel
+        );
+
+        if (approved !== actionLabel) return;
+
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: allSelected ? 'Squashing recent commits' : 'Rewriting recent commits',
+            cancellable: false
+        }, async (progress) => {
+            progress.report({ message: 'Rewriting branch history...' });
+            await applySquashPlan(rootPath, recentCommits, selectedCommits, commitMessage);
+        });
+
+        const summary = await getHeadCommitSummary(rootPath);
+        const currentUpstream = await tryGetUpstreamBranch(rootPath);
+        const pushNote = currentUpstream
+            ? ' If this branch was already pushed, the next push may require git push --force-with-lease.'
+            : '';
+
+        vscode.window.showInformationMessage(
+            `Created ${summary.shortSha}: ${summary.subject}.${pushNote}`
         );
     } catch (error) {
         vscode.window.showErrorMessage(error.message);
@@ -743,6 +809,165 @@ function buildCommitArgs(commitPlan) {
     return ['commit', '--amend', '-m', commitPlan.message];
 }
 
+async function getReachableCommitCount(rootPath) {
+    const output = await gitOutput(rootPath, ['rev-list', '--count', 'HEAD']);
+    return Number(output);
+}
+
+async function ensureCommitHistoryExists(rootPath) {
+    try {
+        await gitOutput(rootPath, ['rev-parse', '--verify', 'HEAD']);
+    } catch (error) {
+        throw new Error('This repository has no commits yet. Create commits before using Squash Recent Commits.');
+    }
+}
+
+async function promptForSquashCommitCount(maxSquashCount) {
+    const value = await vscode.window.showInputBox({
+        prompt: `How many recent commits do you want to review and squash?`,
+        placeHolder: `Enter a number from 2 to ${maxSquashCount}`,
+        validateInput: (input) => {
+            const trimmed = input.trim();
+            if (!trimmed) return 'Enter the number of recent commits to review.';
+            if (!/^\d+$/.test(trimmed)) return 'Use digits only.';
+
+            const count = Number(trimmed);
+            if (count < 2) return 'Select at least 2 recent commits.';
+            if (count > maxSquashCount) {
+                return `Only 2 to ${maxSquashCount} recent commits are supported here.`;
+            }
+
+            return null;
+        }
+    });
+
+    return value ? Number(value.trim()) : null;
+}
+
+async function getRecentCommits(rootPath, count) {
+    const format = '%H%x1f%h%x1f%s%x1f%an%x1f%ad%x1e';
+    const output = await gitOutput(rootPath, ['log', '-n', String(count), '--date=short', `--format=${format}`]);
+
+    if (!output) {
+        return [];
+    }
+
+    return output
+        .split('\x1e')
+        .map((entry) => entry.trim())
+        .filter((entry) => entry !== '')
+        .map((entry) => {
+            const [sha, shortSha, subject, author, date] = entry.split('\x1f');
+            return { sha, shortSha, subject, author, date };
+        });
+}
+
+async function pickCommitsToSquash(commits) {
+    return new Promise((resolve) => {
+        const quickPick = vscode.window.createQuickPick();
+        let settled = false;
+
+        const items = commits.map((commit, index) => ({
+            label: `${commit.shortSha} ${commit.subject}`,
+            description: `${commit.author} - ${commit.date}`,
+            detail: index === 0 ? 'HEAD (most recent commit)' : `HEAD~${index}`,
+            picked: true,
+            commit
+        }));
+
+        const finish = (value) => {
+            if (settled) return;
+            settled = true;
+            quickPick.dispose();
+            resolve(value);
+        };
+
+        quickPick.canSelectMany = true;
+        quickPick.title = 'Squash Recent Commits: Review commits';
+        quickPick.placeholder = 'Deselect any recent commits you want to drop from the rewritten history';
+        quickPick.matchOnDescription = true;
+        quickPick.matchOnDetail = true;
+        quickPick.items = items;
+        quickPick.selectedItems = items;
+
+        quickPick.onDidAccept(() => {
+            if (quickPick.selectedItems.length === 0) {
+                vscode.window.showErrorMessage('Select at least one commit to keep.');
+                return;
+            }
+
+            const selectedShas = new Set(quickPick.selectedItems.map((item) => item.commit.sha));
+            quickPick.hide();
+            finish(commits.filter((commit) => selectedShas.has(commit.sha)));
+        });
+
+        quickPick.onDidHide(() => {
+            finish(undefined);
+        });
+
+        quickPick.show();
+    });
+}
+
+function buildSquashConfirmation(currentBranch, reviewedCommits, selectedCommits, commitMessage) {
+    const droppedCommits = reviewedCommits.filter(
+        (reviewedCommit) => !selectedCommits.some((selectedCommit) => selectedCommit.sha === reviewedCommit.sha)
+    );
+    const keepSummary = selectedCommits.map((commit) => commit.shortSha).join(', ');
+    const dropSummary = droppedCommits.length === 0
+        ? 'none'
+        : droppedCommits.map((commit) => commit.shortSha).join(', ');
+    const action = droppedCommits.length === 0
+        ? `Squash the last ${reviewedCommits.length} commits into one new commit`
+        : `Rewrite the last ${reviewedCommits.length} commits and keep ${selectedCommits.length} of them in one new commit`;
+
+    return [
+        `Current branch: ${currentBranch}`,
+        `Reviewed commits: ${reviewedCommits.length}`,
+        `Keep: ${keepSummary}`,
+        `Drop: ${dropSummary}`,
+        `Action: ${action}`,
+        `New message: ${commitMessage}`,
+        'Warning: this rewrites branch history.'
+    ].join('\n');
+}
+
+async function applySquashPlan(rootPath, reviewedCommits, selectedCommits, commitMessage) {
+    const backupSha = await gitOutput(rootPath, ['rev-parse', 'HEAD']);
+    const allSelected = selectedCommits.length === reviewedCommits.length;
+
+    try {
+        if (allSelected) {
+            await git(rootPath, ['reset', '--soft', `HEAD~${reviewedCommits.length}`]);
+        } else {
+            const selectedShasInReplayOrder = selectedCommits
+                .slice()
+                .reverse()
+                .map((commit) => commit.sha);
+
+            await git(rootPath, ['reset', '--hard', `HEAD~${reviewedCommits.length}`]);
+            await git(rootPath, ['cherry-pick', '--no-commit', ...selectedShasInReplayOrder]);
+        }
+
+        await ensureStagedChangesExist(rootPath, 'The selected commits do not produce any staged changes to commit.');
+        await git(rootPath, ['commit', '-m', commitMessage]);
+    } catch (error) {
+        try {
+            await git(rootPath, ['cherry-pick', '--abort']);
+        } catch (abortError) {
+            // Ignore missing cherry-pick state and continue restoring HEAD.
+        }
+
+        try {
+            await git(rootPath, ['reset', '--hard', backupSha]);
+        } catch (restoreError) {
+            throw new Error(`${error.message}\nThe branch rewrite failed, and automatic restore also failed: ${restoreError.message}`);
+        }
+
+        throw new Error(`${error.message}\nThe branch was restored to its previous HEAD.`);
+    }
+}
+
 async function pickSourceBranch(remoteBranches, localBranches) {
     if (remoteBranches.length === 1) return remoteBranches[0];
 
@@ -807,7 +1032,7 @@ async function requireCurrentBranch(rootPath) {
     const currentBranch = await gitOutput(rootPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
 
     if (currentBranch === 'HEAD') {
-        throw new Error('Detached HEAD is not supported. Check out a branch before rebasing.');
+        throw new Error('Detached HEAD is not supported. Check out a branch before running this action.');
     }
 
     return currentBranch;
@@ -826,6 +1051,14 @@ async function ensureNoStagedChanges(rootPath) {
 
     if (staged) {
         throw new Error('Commit Changes requires no pre-existing staged files. Commit, unstage, or discard them first.');
+    }
+}
+
+async function ensureStagedChangesExist(rootPath, message) {
+    const staged = await gitOutput(rootPath, ['diff', '--cached', '--name-only']);
+
+    if (!staged) {
+        throw new Error(message);
     }
 }
 
