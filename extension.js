@@ -61,6 +61,11 @@ function activate(context) {
         if (!rootPath()) return vscode.window.showErrorMessage('Open a project!');
         await rebaseCurrentBranchLogic(rootPath());
     }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('super-git-helper.commitChanges', async () => {
+        if (!rootPath()) return vscode.window.showErrorMessage('Open a project!');
+        await commitChangesLogic(rootPath());
+    }));
 }
 
 async function listChangedFilesLogic(rootPath) {
@@ -334,6 +339,53 @@ async function rebaseCurrentBranchLogic(rootPath) {
     }
 }
 
+async function commitChangesLogic(rootPath) {
+    try {
+        const currentBranch = await requireCurrentBranch(rootPath);
+        await ensureNoStagedChanges(rootPath);
+
+        const changedFiles = await getChangedFiles(rootPath);
+        if (changedFiles.length === 0) {
+            vscode.window.showInformationMessage('No changed files are available to commit.');
+            return;
+        }
+
+        ensureNoUnmergedFiles(changedFiles);
+
+        const selectedFiles = await pickFilesToCommit(changedFiles);
+        if (!selectedFiles || selectedFiles.length === 0) return;
+
+        const commitPlan = await collectCommitPlan(rootPath, currentBranch, selectedFiles);
+        if (!commitPlan) return;
+
+        const confirmation = buildCommitConfirmation(currentBranch, selectedFiles, commitPlan);
+        const approved = await vscode.window.showWarningMessage(
+            confirmation,
+            { modal: true },
+            commitPlan.type === 'amend' ? 'Commit Amend' : 'Create Commit'
+        );
+
+        const expectedAction = commitPlan.type === 'amend' ? 'Commit Amend' : 'Create Commit';
+        if (approved !== expectedAction) return;
+
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: commitPlan.type === 'amend' ? 'Amending commit' : 'Creating commit',
+            cancellable: false
+        }, async () => {
+            await git(rootPath, ['add', '--', ...selectedFiles.map((file) => file.path)]);
+            await git(rootPath, buildCommitArgs(commitPlan));
+        });
+
+        const summary = await getHeadCommitSummary(rootPath);
+        vscode.window.showInformationMessage(
+            `${commitPlan.type === 'amend' ? 'Amended' : 'Created'} ${summary.shortSha}: ${summary.subject}`
+        );
+    } catch (error) {
+        vscode.window.showErrorMessage(error.message);
+    }
+}
+
 function isCherryPickConflict(message) {
     return /conflict/i.test(message) || message.includes('cherry-pick --continue');
 }
@@ -344,6 +396,15 @@ function isRevertConflict(message) {
 
 function isRebaseConflict(message) {
     return /conflict/i.test(message) || message.includes('rebase --continue') || message.includes('Resolve all conflicts');
+}
+
+function ensureNoUnmergedFiles(changedFiles) {
+    const unmergedCodes = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU']);
+    const conflicted = changedFiles.find((file) => unmergedCodes.has(`${file.indexStatus}${file.worktreeStatus}`));
+
+    if (conflicted) {
+        throw new Error('Resolve merge conflicts before using Commit Changes.');
+    }
 }
 
 async function inspectCommit(rootPath, commitRef, title) {
@@ -393,6 +454,54 @@ async function getContainingBranches(rootPath, commitRef, remoteOnly) {
         }));
 }
 
+async function getChangedFiles(rootPath) {
+    const { stdout } = await git(rootPath, ['status', '--porcelain=1', '-z']);
+    return parsePorcelainStatus(stdout);
+}
+
+function parsePorcelainStatus(output) {
+    const entries = [];
+    let offset = 0;
+
+    while (offset < output.length) {
+        if (!output[offset]) break;
+
+        const indexStatus = output[offset];
+        const worktreeStatus = output[offset + 1];
+        offset += 3;
+
+        let pathEnd = output.indexOf('\0', offset);
+        if (pathEnd === -1) {
+            pathEnd = output.length;
+        }
+
+        const path = output.slice(offset, pathEnd);
+        offset = pathEnd + 1;
+
+        let originalPath = null;
+        if (indexStatus === 'R' || indexStatus === 'C') {
+            let originalEnd = output.indexOf('\0', offset);
+            if (originalEnd === -1) {
+                originalEnd = output.length;
+            }
+
+            originalPath = output.slice(offset, originalEnd);
+            offset = originalEnd + 1;
+        }
+
+        entries.push({
+            path,
+            originalPath,
+            indexStatus,
+            worktreeStatus,
+            code: `${indexStatus}${worktreeStatus}`.trim() || '??',
+            label: originalPath ? `${originalPath} -> ${path}` : path
+        });
+    }
+
+    return entries;
+}
+
 async function getBranchRefs(rootPath, remoteOnly) {
     const args = remoteOnly ? ['branch', '-r'] : ['branch'];
     const output = await gitOutput(rootPath, args);
@@ -432,6 +541,111 @@ async function pickRebaseTarget(rootPath, currentBranch) {
         ...selected.branch,
         source: 'manual'
     };
+}
+
+async function pickFilesToCommit(changedFiles) {
+    const selected = await vscode.window.showQuickPick(
+        changedFiles.map((file) => ({
+            label: file.label,
+            description: file.code,
+            detail: buildCommitFileDetail(file),
+            file
+        })),
+        {
+            canPickMany: true,
+            title: 'Commit Changes: Select files to stage'
+        }
+    );
+
+    return selected?.map((item) => item.file);
+}
+
+function buildCommitFileDetail(file) {
+    const staged = file.indexStatus === ' ' ? 'no' : file.indexStatus;
+    const unstaged = file.worktreeStatus === ' ' ? 'no' : file.worktreeStatus;
+    return `Index: ${staged}  Worktree: ${unstaged}`;
+}
+
+async function collectCommitPlan(rootPath, currentBranch, selectedFiles) {
+    const mode = await vscode.window.showQuickPick([
+        {
+            label: 'New commit',
+            id: 'new',
+            detail: `Create a new commit on ${currentBranch}`
+        },
+        {
+            label: 'Amend previous commit',
+            id: 'amend',
+            detail: 'Amend HEAD with the selected files'
+        }
+    ], {
+        title: 'Commit Changes: Choose commit mode'
+    });
+
+    if (!mode) return null;
+
+    if (mode.id === 'new') {
+        const message = await promptForCommitMessage('Commit message');
+        if (!message) return null;
+        return { type: 'new', message };
+    }
+
+    await ensureHeadCommitExists(rootPath);
+
+    const amendMode = await vscode.window.showQuickPick([
+        {
+            label: 'Keep previous message',
+            id: 'keep',
+            detail: 'Amend HEAD without changing its commit message'
+        },
+        {
+            label: 'Edit commit message',
+            id: 'edit',
+            detail: 'Amend HEAD and replace its commit message'
+        }
+    ], {
+        title: 'Commit Changes: Amend options'
+    });
+
+    if (!amendMode) return null;
+
+    if (amendMode.id === 'keep') {
+        return { type: 'amend', amendMode: 'keep' };
+    }
+
+    const previousMessage = await getHeadCommitMessage(rootPath);
+    const message = await promptForCommitMessage('New commit message', previousMessage);
+    if (!message) return null;
+    return { type: 'amend', amendMode: 'edit', message };
+}
+
+function buildCommitConfirmation(currentBranch, selectedFiles, commitPlan) {
+    const summary = selectedFiles.length === 1
+        ? selectedFiles[0].label
+        : `${selectedFiles.length} files selected`;
+    const action = commitPlan.type === 'amend'
+        ? commitPlan.amendMode === 'keep'
+            ? 'Amend previous commit and keep its message'
+            : 'Amend previous commit with a new message'
+        : `Create a new commit: ${commitPlan.message}`;
+
+    return [
+        `Current branch: ${currentBranch}`,
+        `Files: ${summary}`,
+        `Action: ${action}`
+    ].join('\n');
+}
+
+function buildCommitArgs(commitPlan) {
+    if (commitPlan.type === 'new') {
+        return ['commit', '-m', commitPlan.message];
+    }
+
+    if (commitPlan.amendMode === 'keep') {
+        return ['commit', '--amend', '--no-edit'];
+    }
+
+    return ['commit', '--amend', '-m', commitPlan.message];
 }
 
 async function pickSourceBranch(remoteBranches, localBranches) {
@@ -512,6 +726,14 @@ async function ensureCleanWorktree(rootPath) {
     }
 }
 
+async function ensureNoStagedChanges(rootPath) {
+    const staged = await gitOutput(rootPath, ['diff', '--cached', '--name-only']);
+
+    if (staged) {
+        throw new Error('Commit Changes requires no pre-existing staged files. Commit, unstage, or discard them first.');
+    }
+}
+
 async function getUpstreamBranch(rootPath) {
     try {
         return await gitOutput(rootPath, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']);
@@ -526,6 +748,34 @@ async function tryGetUpstreamBranch(rootPath) {
     } catch (error) {
         return null;
     }
+}
+
+async function ensureHeadCommitExists(rootPath) {
+    try {
+        await gitOutput(rootPath, ['rev-parse', '--verify', 'HEAD']);
+    } catch (error) {
+        throw new Error('There is no previous commit to amend yet.');
+    }
+}
+
+async function getHeadCommitMessage(rootPath) {
+    return gitOutput(rootPath, ['log', '-1', '--pretty=%B']);
+}
+
+async function getHeadCommitSummary(rootPath) {
+    const output = await gitOutput(rootPath, ['show', '-s', '--format=%h%n%s', 'HEAD']);
+    const [shortSha, subject] = output.split('\n');
+    return { shortSha, subject };
+}
+
+async function promptForCommitMessage(prompt, value = '') {
+    const message = await vscode.window.showInputBox({
+        prompt,
+        value,
+        validateInput: (input) => input.trim() ? null : 'Commit message cannot be empty.'
+    });
+
+    return message?.trim() || null;
 }
 
 async function diffWithReference(rootPath, filePath, reference) {
