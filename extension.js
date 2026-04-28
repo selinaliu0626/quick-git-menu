@@ -66,6 +66,11 @@ function activate(context) {
         if (!rootPath()) return vscode.window.showErrorMessage('Open a project!');
         await commitChangesLogic(rootPath());
     }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('super-git-helper.createRemoteBranch', async () => {
+        if (!rootPath()) return vscode.window.showErrorMessage('Open a project!');
+        await createRemoteBranchLogic(rootPath());
+    }));
 }
 
 async function listChangedFilesLogic(rootPath) {
@@ -202,29 +207,18 @@ async function rollbackCommitLogic(rootPath) {
     if (!commitRef) return;
 
     try {
-        const currentBranch = await gitOutput(rootPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+        const currentBranch = await requireCurrentBranch(rootPath);
+        await ensureCleanWorktree(rootPath);
         const inspection = await inspectCommit(rootPath, commitRef.trim(), 'Preparing rollback');
-
-        const sourceBranch = await pickSourceBranch(inspection.remoteBranches, inspection.localBranches);
-        if (sourceBranch === undefined) return;
-
-        if (sourceBranch && sourceBranch.type === 'remote') {
-            await vscode.window.withProgress({
-                location: vscode.ProgressLocation.Notification,
-                title: 'Fetching source branch',
-                cancellable: false
-            }, async () => {
-                const { remoteName, branchName } = splitRemoteBranch(sourceBranch.name);
-                await git(rootPath, ['fetch', remoteName, branchName]);
-            });
-        }
+        await ensureCommitCanBeDropped(rootPath, inspection.commitInfo.sha);
+        const parentCommit = await getCommitParent(rootPath, inspection.commitInfo.sha);
 
         const confirmation = [
             `Current branch: ${currentBranch}`,
             `Rollback commit: ${inspection.commitInfo.shortSha} ${inspection.commitInfo.subject}`,
             `Author: ${inspection.commitInfo.author}`,
             `Date: ${inspection.commitInfo.date}`,
-            `Source: ${formatSourceBranchLabel(sourceBranch)}`
+            'Warning: this rewrites branch history and removes the commit cleanly.'
         ].join('\n');
 
         const approved = await vscode.window.showWarningMessage(
@@ -240,15 +234,20 @@ async function rollbackCommitLogic(rootPath) {
             title: 'Applying rollback',
             cancellable: false
         }, async () => {
-            await git(rootPath, ['revert', '--no-commit', inspection.commitInfo.sha]);
+            await git(rootPath, ['rebase', '--onto', parentCommit, inspection.commitInfo.sha]);
         });
 
+        const currentUpstream = await tryGetUpstreamBranch(rootPath);
+        const pushNote = currentUpstream
+            ? ' If this branch was already pushed, the next push may require git push --force-with-lease.'
+            : '';
+
         vscode.window.showInformationMessage(
-            `Applied rollback for ${inspection.commitInfo.shortSha} onto ${currentBranch} without creating a commit.`
+            `Removed ${inspection.commitInfo.shortSha} from ${currentBranch}.${pushNote}`
         );
     } catch (error) {
-        const message = isRevertConflict(error.message)
-            ? `${error.message}\nResolve conflicts, then run git revert --continue or git revert --abort.`
+        const message = isRollbackConflict(error.message)
+            ? `${error.message}\nResolve conflicts, then run git rebase --continue, git rebase --skip, or git rebase --abort.`
             : error.message;
         vscode.window.showErrorMessage(message);
     }
@@ -386,16 +385,71 @@ async function commitChangesLogic(rootPath) {
     }
 }
 
+async function createRemoteBranchLogic(rootPath) {
+    try {
+        const currentBranch = await requireCurrentBranch(rootPath);
+        const remoteName = await pickRemoteForBranchCreation(rootPath);
+        if (!remoteName) return;
+
+        const remoteBranchName = await vscode.window.showInputBox({
+            prompt: `Remote branch name for ${remoteName}`,
+            value: currentBranch,
+            validateInput: (input) => {
+                const branchName = input.trim();
+                if (!branchName) return 'Remote branch name cannot be empty.';
+                if (/\s/.test(branchName)) return 'Remote branch name cannot contain spaces.';
+                return null;
+            }
+        });
+
+        if (!remoteBranchName) return;
+
+        const branchName = remoteBranchName.trim();
+        const remoteBranchExists = await hasRemoteBranch(rootPath, remoteName, branchName);
+        const action = remoteBranchExists ? 'Push and Track' : 'Create and Track';
+        const confirmation = [
+            `Current branch: ${currentBranch}`,
+            `Remote: ${remoteName}`,
+            `Remote branch: ${branchName}`,
+            remoteBranchExists
+                ? 'Warning: this remote branch already exists and will be updated if the push succeeds.'
+                : 'This will create the remote branch and set it as upstream.'
+        ].join('\n');
+
+        const approved = await vscode.window.showWarningMessage(
+            confirmation,
+            { modal: true },
+            action
+        );
+
+        if (approved !== action) return;
+
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: `${remoteBranchExists ? 'Pushing' : 'Creating'} ${remoteName}/${branchName}`,
+            cancellable: false
+        }, async () => {
+            await git(rootPath, ['push', '-u', remoteName, `HEAD:${branchName}`]);
+        });
+
+        vscode.window.showInformationMessage(
+            `${remoteBranchExists ? 'Updated' : 'Created'} ${remoteName}/${branchName} and set it as upstream for ${currentBranch}.`
+        );
+    } catch (error) {
+        vscode.window.showErrorMessage(error.message);
+    }
+}
+
 function isCherryPickConflict(message) {
     return /conflict/i.test(message) || message.includes('cherry-pick --continue');
 }
 
-function isRevertConflict(message) {
-    return /conflict/i.test(message) || message.includes('revert --continue');
-}
-
 function isRebaseConflict(message) {
     return /conflict/i.test(message) || message.includes('rebase --continue') || message.includes('Resolve all conflicts');
+}
+
+function isRollbackConflict(message) {
+    return isRebaseConflict(message);
 }
 
 function ensureNoUnmergedFiles(changedFiles) {
@@ -748,6 +802,81 @@ async function tryGetUpstreamBranch(rootPath) {
     } catch (error) {
         return null;
     }
+}
+
+async function pickRemoteForBranchCreation(rootPath) {
+    const remoteNames = await getRemoteNames(rootPath);
+
+    if (remoteNames.length === 0) {
+        throw new Error('No Git remotes are configured for this repository.');
+    }
+
+    const upstream = await tryGetUpstreamBranch(rootPath);
+    const upstreamRemoteName = upstream ? splitRemoteBranch(upstream).remoteName : null;
+
+    if (remoteNames.length === 1) {
+        return remoteNames[0];
+    }
+
+    const selected = await vscode.window.showQuickPick(
+        remoteNames.map((remoteName) => ({
+            label: remoteName,
+            detail: remoteName === upstreamRemoteName ? 'Current upstream remote' : 'Available Git remote'
+        })),
+        {
+            title: 'Create Remote Branch: Select remote'
+        }
+    );
+
+    return selected?.label;
+}
+
+async function getRemoteNames(rootPath) {
+    const output = await gitOutput(rootPath, ['remote']);
+    return output
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line !== '');
+}
+
+async function hasRemoteBranch(rootPath, remoteName, branchName) {
+    try {
+        const output = await gitOutput(rootPath, ['ls-remote', '--heads', remoteName, branchName]);
+        return output !== '';
+    } catch (error) {
+        return false;
+    }
+}
+
+async function ensureCommitCanBeDropped(rootPath, commitRef) {
+    const isOnCurrentBranch = await isCommitAncestorOfHead(rootPath, commitRef);
+    if (!isOnCurrentBranch) {
+        throw new Error('Rollback Commit only supports commits that are on the current branch history.');
+    }
+
+    const parentLine = await gitOutput(rootPath, ['rev-list', '--parents', '-n', '1', commitRef]);
+    const parts = parentLine.split(' ').filter(Boolean);
+
+    if (parts.length === 1) {
+        throw new Error('Rollback Commit does not support removing the root commit.');
+    }
+
+    if (parts.length > 2) {
+        throw new Error('Rollback Commit does not support merge commits.');
+    }
+}
+
+async function isCommitAncestorOfHead(rootPath, commitRef) {
+    try {
+        await git(rootPath, ['merge-base', '--is-ancestor', commitRef, 'HEAD']);
+        return true;
+    } catch (error) {
+        return false;
+    }
+}
+
+async function getCommitParent(rootPath, commitRef) {
+    return gitOutput(rootPath, ['rev-parse', `${commitRef}^`]);
 }
 
 async function ensureHeadCommitExists(rootPath) {
