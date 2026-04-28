@@ -22,7 +22,8 @@ In VS Code, the extension appears as **Super Git Helper** in the activity bar an
 - Roll back a commit by SHA with clean history by removing that commit from the current branch
 - Rebase the current branch onto its configured upstream or onto a selected local or remote branch
 - Commit selected changed files with a new message or by amending the previous commit
-- Create a remote branch from the current local branch, using the local branch name by default but allowing a custom remote branch name
+- Create a remote branch from the current local branch, with a dropdown of suggested remote branch names and support for custom input
+- Push the current local branch to a selected remote branch, with a dropdown of suggested remote branch names and support for custom input
 
 ## Commands
 
@@ -37,6 +38,7 @@ The extension contributes these commands:
 - `Rebase Current Branch`
 - `Commit Changes`
 - `Create Remote Branch`
+- `Push Branch`
 
 ## How It Works
 
@@ -49,6 +51,7 @@ The extension uses the first open workspace folder as the Git repo root and runs
 - `git cherry-pick --no-commit`
 - `git commit`
 - `git push -u`
+- `git push`
 - `git rebase`
 - `git push --delete`
 - `git status --short`
@@ -67,5 +70,6 @@ The extension uses the first open workspace folder as the Git repo root and runs
 - It depends on Git being installed and available on your system `PATH`.
 - Commit Changes only stages the files you select and refuses to run if other files are already staged.
 - Create Remote Branch pushes `HEAD` to the selected remote and sets the created or updated remote branch as upstream.
+- Push Branch pushes `HEAD` to the selected remote branch but does not change the current branch upstream automatically.
 - Rollback Commit rewrites the current branch history, does not support merge commits or the root commit, and may require `git push --force-with-lease`.
 - Rebase requires a clean working tree and does not auto-push or auto-stash changes.

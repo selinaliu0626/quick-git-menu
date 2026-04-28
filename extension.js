@@ -71,6 +71,11 @@ function activate(context) {
         if (!rootPath()) return vscode.window.showErrorMessage('Open a project!');
         await createRemoteBranchLogic(rootPath());
     }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('super-git-helper.pushBranch', async () => {
+        if (!rootPath()) return vscode.window.showErrorMessage('Open a project!');
+        await pushBranchLogic(rootPath());
+    }));
 }
 
 async function listChangedFilesLogic(rootPath) {
@@ -388,19 +393,10 @@ async function commitChangesLogic(rootPath) {
 async function createRemoteBranchLogic(rootPath) {
     try {
         const currentBranch = await requireCurrentBranch(rootPath);
-        const remoteName = await pickRemoteForBranchCreation(rootPath);
+        const remoteName = await pickRemoteName(rootPath, 'Create Remote Branch: Select remote');
         if (!remoteName) return;
 
-        const remoteBranchName = await vscode.window.showInputBox({
-            prompt: `Remote branch name for ${remoteName}`,
-            value: currentBranch,
-            validateInput: (input) => {
-                const branchName = input.trim();
-                if (!branchName) return 'Remote branch name cannot be empty.';
-                if (/\s/.test(branchName)) return 'Remote branch name cannot contain spaces.';
-                return null;
-            }
-        });
+        const remoteBranchName = await promptForRemoteBranchName(rootPath, remoteName, currentBranch);
 
         if (!remoteBranchName) return;
 
@@ -434,6 +430,51 @@ async function createRemoteBranchLogic(rootPath) {
 
         vscode.window.showInformationMessage(
             `${remoteBranchExists ? 'Updated' : 'Created'} ${remoteName}/${branchName} and set it as upstream for ${currentBranch}.`
+        );
+    } catch (error) {
+        vscode.window.showErrorMessage(error.message);
+    }
+}
+
+async function pushBranchLogic(rootPath) {
+    try {
+        const currentBranch = await requireCurrentBranch(rootPath);
+        const remoteName = await pickRemoteName(rootPath, 'Push Branch: Select remote');
+        if (!remoteName) return;
+
+        const remoteBranchName = await promptForRemoteBranchName(rootPath, remoteName, currentBranch);
+        if (!remoteBranchName) return;
+
+        const branchName = remoteBranchName.trim();
+        const remoteBranchExists = await hasRemoteBranch(rootPath, remoteName, branchName);
+        const action = remoteBranchExists ? 'Push Branch' : 'Create and Push';
+        const confirmation = [
+            `Current branch: ${currentBranch}`,
+            `Remote: ${remoteName}`,
+            `Remote branch: ${branchName}`,
+            remoteBranchExists
+                ? 'This will push the current branch onto the existing remote branch.'
+                : 'This will create the remote branch by pushing the current branch to it.'
+        ].join('\n');
+
+        const approved = await vscode.window.showWarningMessage(
+            confirmation,
+            { modal: true },
+            action
+        );
+
+        if (approved !== action) return;
+
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: `${remoteBranchExists ? 'Pushing' : 'Creating and pushing'} ${remoteName}/${branchName}`,
+            cancellable: false
+        }, async () => {
+            await git(rootPath, ['push', remoteName, `HEAD:${branchName}`]);
+        });
+
+        vscode.window.showInformationMessage(
+            `${remoteBranchExists ? 'Pushed' : 'Created and pushed'} ${currentBranch} to ${remoteName}/${branchName}.`
         );
     } catch (error) {
         vscode.window.showErrorMessage(error.message);
@@ -804,7 +845,7 @@ async function tryGetUpstreamBranch(rootPath) {
     }
 }
 
-async function pickRemoteForBranchCreation(rootPath) {
+async function pickRemoteName(rootPath, title) {
     const remoteNames = await getRemoteNames(rootPath);
 
     if (remoteNames.length === 0) {
@@ -824,11 +865,106 @@ async function pickRemoteForBranchCreation(rootPath) {
             detail: remoteName === upstreamRemoteName ? 'Current upstream remote' : 'Available Git remote'
         })),
         {
-            title: 'Create Remote Branch: Select remote'
+            title
         }
     );
 
     return selected?.label;
+}
+
+async function promptForRemoteBranchName(rootPath, remoteName, defaultBranchName) {
+    const suggestions = await getRemoteBranchNameSuggestions(rootPath, remoteName, defaultBranchName);
+
+    return new Promise((resolve) => {
+        const quickPick = vscode.window.createQuickPick();
+        let settled = false;
+        quickPick.title = `Remote branch name for ${remoteName}`;
+        quickPick.placeholder = 'Select a suggested branch name or type a custom one';
+        quickPick.matchOnDescription = true;
+        quickPick.value = defaultBranchName;
+        quickPick.items = suggestions.map((suggestion) => ({
+            label: suggestion.name,
+            description: suggestion.description
+        }));
+
+        const finish = (value) => {
+            if (settled) return;
+            settled = true;
+            quickPick.dispose();
+            resolve(value);
+        };
+
+        quickPick.onDidAccept(() => {
+            const selectedLabel = quickPick.selectedItems[0]?.label;
+            const typedValue = quickPick.value.trim();
+            const branchName = (selectedLabel || typedValue).trim();
+
+            if (!branchName) {
+                vscode.window.showErrorMessage('Remote branch name cannot be empty.');
+                return;
+            }
+
+            if (/\s/.test(branchName)) {
+                vscode.window.showErrorMessage('Remote branch name cannot contain spaces.');
+                return;
+            }
+
+            quickPick.hide();
+            finish(branchName);
+        });
+
+        quickPick.onDidHide(() => {
+            finish(undefined);
+        });
+
+        quickPick.show();
+    });
+}
+
+async function getRemoteBranchNameSuggestions(rootPath, remoteName, defaultBranchName) {
+    const suggestions = new Map();
+    const addSuggestion = (name, description) => {
+        const branchName = name.trim();
+        if (!branchName || suggestions.has(branchName)) return;
+        suggestions.set(branchName, { name: branchName, description });
+    };
+
+    addSuggestion(defaultBranchName, 'Current local branch name');
+
+    const upstream = await tryGetUpstreamBranch(rootPath);
+    if (upstream) {
+        const { remoteName: upstreamRemote, branchName } = splitRemoteBranch(upstream);
+        if (upstreamRemote === remoteName) {
+            addSuggestion(branchName, 'Current upstream branch name');
+        }
+    }
+
+    const remoteBranches = await getRemoteBranchNames(rootPath, remoteName);
+    for (const branchName of remoteBranches) {
+        if (branchName === defaultBranchName) {
+            addSuggestion(branchName, 'Existing remote branch with the same name');
+            continue;
+        }
+
+        if (branchName.startsWith(defaultBranchName) || defaultBranchName.startsWith(branchName)) {
+            addSuggestion(branchName, 'Existing similar remote branch');
+        }
+    }
+
+    for (const branchName of remoteBranches) {
+        addSuggestion(branchName, 'Existing remote branch');
+    }
+
+    return Array.from(suggestions.values());
+}
+
+async function getRemoteBranchNames(rootPath, remoteName) {
+    const output = await gitOutput(rootPath, ['branch', '-r', '--list', `${remoteName}/*`]);
+    return output
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line !== '' && !line.includes('->'))
+        .map((line) => splitRemoteBranch(line).branchName);
 }
 
 async function getRemoteNames(rootPath) {
