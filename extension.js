@@ -357,7 +357,7 @@ async function commitChangesLogic(rootPath) {
         const selectedFiles = await pickFilesToCommit(changedFiles);
         if (!selectedFiles || selectedFiles.length === 0) return;
 
-        const commitPlan = await collectCommitPlan(rootPath, currentBranch, selectedFiles);
+        const commitPlan = await collectCommitPlan(rootPath, currentBranch);
         if (!commitPlan) return;
 
         const confirmation = buildCommitConfirmation(currentBranch, selectedFiles, commitPlan);
@@ -398,7 +398,8 @@ async function squashRecentCommitsLogic(rootPath) {
         const maxSquashCount = reachableCommitCount - 1;
 
         if (maxSquashCount < 2) {
-            throw new Error('Squash Recent Commits requires at least 3 commits on the current branch because the root commit is not supported.');
+            vscode.window.showErrorMessage('Squash Recent Commits requires at least 3 commits on the current branch because the root commit is not supported.');
+            return;
         }
 
         const reviewedCommitCount = await promptForSquashCommitCount(maxSquashCount);
@@ -406,7 +407,8 @@ async function squashRecentCommitsLogic(rootPath) {
 
         const recentCommits = await getRecentCommits(rootPath, reviewedCommitCount);
         if (recentCommits.length !== reviewedCommitCount) {
-            throw new Error(`Expected ${reviewedCommitCount} commits to review, but found ${recentCommits.length}.`);
+            vscode.window.showErrorMessage(`Expected ${reviewedCommitCount} commits to review, but found ${recentCommits.length}.`);
+            return;
         }
 
         const selectedCommits = await pickCommitsToSquash(recentCommits);
@@ -501,7 +503,9 @@ async function pushBranchLogic(rootPath) {
         const remoteName = await pickRemoteName(rootPath, 'Push Branch: Select remote');
         if (!remoteName) return;
 
-        const remoteBranchName = await promptForRemoteBranchName(rootPath, remoteName, currentBranch);
+        const remoteBranchName = await promptForRemoteBranchName(rootPath, remoteName, currentBranch, {
+            preferUpstreamBranch: true
+        });
         if (!remoteBranchName) return;
 
         const branchName = remoteBranchName.trim();
@@ -720,7 +724,7 @@ function buildCommitFileDetail(file) {
     return `Index: ${staged}  Worktree: ${unstaged}`;
 }
 
-async function collectCommitPlan(rootPath, currentBranch, selectedFiles) {
+async function collectCommitPlan(rootPath, currentBranch) {
     const mode = await vscode.window.showQuickPick([
         {
             label: 'New commit',
@@ -1129,8 +1133,9 @@ async function pickRemoteName(rootPath, title) {
     return selected?.label;
 }
 
-async function promptForRemoteBranchName(rootPath, remoteName, defaultBranchName) {
-    const suggestions = await getRemoteBranchNameSuggestions(rootPath, remoteName, defaultBranchName);
+async function promptForRemoteBranchName(rootPath, remoteName, defaultBranchName, options = {}) {
+    const suggestions = await getRemoteBranchNameSuggestions(rootPath, remoteName, defaultBranchName, options);
+    const preferredBranchName = suggestions[0]?.name || defaultBranchName;
 
     return new Promise((resolve) => {
         const quickPick = vscode.window.createQuickPick();
@@ -1138,7 +1143,7 @@ async function promptForRemoteBranchName(rootPath, remoteName, defaultBranchName
         quickPick.title = `Remote branch name for ${remoteName}`;
         quickPick.placeholder = 'Select a suggested branch name or type a custom one';
         quickPick.matchOnDescription = true;
-        quickPick.value = defaultBranchName;
+        quickPick.value = preferredBranchName;
         quickPick.items = suggestions.map((suggestion) => ({
             label: suggestion.name,
             description: suggestion.description
@@ -1178,7 +1183,7 @@ async function promptForRemoteBranchName(rootPath, remoteName, defaultBranchName
     });
 }
 
-async function getRemoteBranchNameSuggestions(rootPath, remoteName, defaultBranchName) {
+async function getRemoteBranchNameSuggestions(rootPath, remoteName, defaultBranchName, options = {}) {
     const suggestions = new Map();
     const addSuggestion = (name, description) => {
         const branchName = name.trim();
@@ -1186,14 +1191,28 @@ async function getRemoteBranchNameSuggestions(rootPath, remoteName, defaultBranc
         suggestions.set(branchName, { name: branchName, description });
     };
 
-    addSuggestion(defaultBranchName, 'Current local branch name');
-
     const upstream = await tryGetUpstreamBranch(rootPath);
+    let upstreamBranchName = null;
     if (upstream) {
         const { remoteName: upstreamRemote, branchName } = splitRemoteBranch(upstream);
         if (upstreamRemote === remoteName) {
-            addSuggestion(branchName, 'Current upstream branch name');
+            upstreamBranchName = branchName;
         }
+    }
+
+    if (options.preferUpstreamBranch && upstreamBranchName) {
+        addSuggestion(upstreamBranchName, 'Current upstream branch name');
+    }
+
+    addSuggestion(
+        defaultBranchName,
+        options.preferUpstreamBranch
+            ? 'Create a new remote branch with the current local branch name'
+            : 'Current local branch name'
+    );
+
+    if (!options.preferUpstreamBranch && upstreamBranchName) {
+        addSuggestion(upstreamBranchName, 'Current upstream branch name');
     }
 
     const remoteBranches = await getRemoteBranchNames(rootPath, remoteName);
